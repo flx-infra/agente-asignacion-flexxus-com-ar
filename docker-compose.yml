@@ -1,0 +1,104 @@
+# ---------------------------------------------------------------------------
+# Orquestador de asignacion de clientes potenciales.
+#
+# Codigo e imagen: bitbucket.org/flexxus_id/agente-asignacion-suitecrm
+# Este repo es solo el stack: lo que Portainer despliega.
+#
+# Dos servicios sobre la MISMA imagen. Comparten los volumenes porque los dos
+# leen el padron y los dos escriben bitacoras:
+#   pantalla        el servidor web de la bandeja
+#   corrida-diaria  la carga automatica de importes de oportunidades ganadas
+#
+# Variables que hay que cargar en el stack: SERVICE_NAME, NODE, LOKI_URL,
+# CRM_USER, CRM_PASSWORD.
+# ---------------------------------------------------------------------------
+version: '3.6'
+
+services:
+  pantalla:
+    image: fabreguesm/agente-asignacion-suitecrm:0.1.0
+    hostname: agente-asignacion-flexxus-com-ar
+    ports:
+      - '3737:3737'
+    networks:
+      - traefik
+    volumes:
+      - 'config:/app/config'
+      - 'data:/app/data'
+      - 'logs:/app/logs'
+    environment:
+      - TZ=America/Argentina/Buenos_Aires
+      - NODE_ENV=production
+      # Dentro del contenedor, escuchar en loopback equivale a no escuchar.
+      - HOST=0.0.0.0
+      - PORT=3737
+      - CRM_BASE_URL=https://crm.flexxus.com.ar/service/v4_1/rest.php
+      - CRM_APP_NAME=OrquestadorFlexxus
+      - CRM_USER=${CRM_USER}
+      - CRM_PASSWORD=${CRM_PASSWORD}
+      - ASIGNADO_POR=Asignaciones Flexxus
+    deploy:
+      placement:
+        constraints: ["${NODE}"]
+      # Sin max_attempts a proposito: la pantalla sale con codigo 1 si el login
+      # al CRM falla, asi que un CRM caido o una password rotada agotaria los
+      # intentos y dejaria el servicio muerto hasta que alguien lo note.
+      restart_policy:
+        condition: any
+        delay: 30s
+    logging:
+      driver: loki
+      options:
+        loki-url: ${LOKI_URL}
+
+  corrida-diaria:
+    image: fabreguesm/agente-asignacion-suitecrm:0.1.0
+    command: ["sh", "deploy/corrida-diaria.sh"]
+    networks:
+      - traefik
+    volumes:
+      - 'config:/app/config'
+      - 'data:/app/data'
+      - 'logs:/app/logs'
+    environment:
+      - TZ=America/Argentina/Buenos_Aires
+      - NODE_ENV=production
+      # Hora (00-23) en que corre la carga de importes.
+      - HORA_CORRIDA=07
+      - CRM_BASE_URL=https://crm.flexxus.com.ar/service/v4_1/rest.php
+      - CRM_APP_NAME=OrquestadorFlexxus
+      - CRM_USER=${CRM_USER}
+      - CRM_PASSWORD=${CRM_PASSWORD}
+    deploy:
+      placement:
+        constraints: ["${NODE}"]
+      restart_policy:
+        condition: any
+        delay: 30s
+    logging:
+      driver: loki
+      options:
+        loki-url: ${LOKI_URL}
+
+# Sin healthcheck a proposito. El arranque tarda unos 7 minutos: la pantalla se
+# loguea al CRM, carga el padron y arma un indice de historial de 18 meses que
+# no se cachea y se rehace cada vez. Con un healthcheck, cualquier dia en que el
+# CRM este lento el start_period se queda corto, Swarm mata el contenedor a
+# mitad del indice y el servicio entra en un loop de reinicios del que no sale.
+# Cuando el indice se persista en data/, conviene agregarlo.
+
+volumes:
+  # No son cache: guardan el padron, los usuarios de la herramienta y las
+  # bitacoras de asignaciones e importes. Si se pierden, se pierde la
+  # trazabilidad de lo que el orquestador hizo sobre el CRM.
+  config:
+    name: "${SERVICE_NAME}_config"
+  data:
+    name: "${SERVICE_NAME}_data"
+  logs:
+    name: "${SERVICE_NAME}_logs"
+
+networks:
+  traefik:
+    external: true
+    name: traefik-network
